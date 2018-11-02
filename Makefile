@@ -7,4 +7,4 @@ build:
 run:
 	go run main.go
 
-.PHONY: build get install run 
+.PHONY: build install run 
