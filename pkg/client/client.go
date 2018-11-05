@@ -7,12 +7,14 @@ import (
 	"archive/tar"
 	"fmt"
 	"io"
-	"log"
+
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 
 	"github.com/spf13/viper"
 
@@ -74,8 +76,6 @@ func (w *WriteCounter) Write(bs []byte) (int, error) {
 
 // Run the show context
 func Run() {
-	log.SetFlags(0)
-
 	// Take a quick and dirty file count. This should be an over-estimate,
 	// since it doesn't currently attempt to re-implement or reuse the
 	// dockerignore logic.
@@ -87,8 +87,7 @@ func Run() {
 		return nil
 	})
 
-	// TODO(pwaller): Make these parameters?
-	r, err := getArchive(".", "Dockerfile")
+	r, err := getArchive(".", viper.GetString("dockerfile"))
 	if err != nil {
 		log.Fatalf("Failed to make context: %v", err)
 	}
