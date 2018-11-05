@@ -32,5 +32,6 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringP("dockerfile", "d", "Dockerfile", "The dockerfile you want to set")
 	rootCmd.PersistentFlags().IntP("files-number", "n", 10, "The number of the files do you want to see")
+	rootCmd.PersistentFlags().StringP("output", "o", "", "The logs output")
 	viper.BindPFlags(rootCmd.PersistentFlags())
 }

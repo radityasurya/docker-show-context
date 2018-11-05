@@ -5,66 +5,21 @@ package client
 
 import (
 	"archive/tar"
+	"bufio"
 	"fmt"
 	"io"
 
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 
+	"github.com/radityasurya/docker-show-context/pkg/docker"
+
 	"github.com/spf13/viper"
-
-	"github.com/docker/docker/builder/dockerignore"
-	"github.com/docker/docker/pkg/archive"
-	"github.com/docker/docker/pkg/fileutils"
 )
-
-// getArchive returns the tarfile io.ReadCloser. It is a direct copy of the
-// logic found in the official docker client.
-// See <https://github.com/docker/docker/blob/78f2b8d8/api/client/build.go#L126-L172>.
-func getArchive(contextDir, relDockerfile string) (io.ReadCloser, error) {
-	var err error
-
-	// And canonicalize dockerfile name to a platform-independent one
-	relDockerfile = archive.CanonicalTarNameForPath(relDockerfile)
-
-	f, err := os.Open(filepath.Join(contextDir, ".dockerignore"))
-	if err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-
-	var excludes []string
-	if err == nil {
-		excludes, err = dockerignore.ReadAll(f)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// If .dockerignore mentions .dockerignore or the Dockerfile
-	// then make sure we send both files over to the daemon
-	// because Dockerfile is, obviously, needed no matter what, and
-	// .dockerignore is needed to know if either one needs to be
-	// removed. The daemon will remove them for us, if needed, after it
-	// parses the Dockerfile. Ignore errors here, as they will have been
-	// caught by validateContextDirectory above.
-	var includes = []string{"."}
-	keepThem1, _ := fileutils.Matches(".dockerignore", excludes)
-	keepThem2, _ := fileutils.Matches(relDockerfile, excludes)
-	if keepThem1 || keepThem2 {
-		includes = append(includes, ".dockerignore", relDockerfile)
-	}
-
-	return archive.TarWithOptions(contextDir, &archive.TarOptions{
-		Compression:     archive.Uncompressed,
-		ExcludePatterns: excludes,
-		IncludeFiles:    includes,
-	})
-}
 
 // WriteCounter counts the bytes written to it.
 type WriteCounter int
@@ -87,7 +42,7 @@ func Run() {
 		return nil
 	})
 
-	r, err := getArchive(".", viper.GetString("dockerfile"))
+	r, err := docker.GetArchive(".", viper.GetString("dockerfile"))
 	if err != nil {
 		log.Fatalf("Failed to make context: %v", err)
 	}
@@ -98,6 +53,7 @@ func Run() {
 	dirFiles := map[string]int64{}
 	dirTime := map[string]int64{}
 	extStorage := map[string]int64{}
+	filesList := map[string]int64{}
 
 	// Counts of amounts seen so far.
 	currentCount := 0
@@ -119,6 +75,7 @@ func Run() {
 	cr := []byte("\r")
 	showUpdate := func(w io.Writer) {
 		os.Stderr.Write(cr) // always to Stderr.
+
 		fmt.Fprintf(w,
 			"  %v / %v (%.0f / %.0f MiB) "+
 				"(%.1fs elapsed)",
@@ -151,6 +108,7 @@ entries:
 		last = time.Now()
 
 		dir := filepath.Dir(header.Name)
+		filename := header.Name
 		size := header.FileInfo().Size()
 
 		currentCount++
@@ -163,6 +121,7 @@ entries:
 		if !header.FileInfo().IsDir() {
 			ext := filepath.Ext(strings.ToLower(header.Name))
 			extStorage[ext] += size
+			filesList[filename] += size
 		}
 
 		select {
@@ -190,13 +149,13 @@ entries:
 	fmt.Println()
 
 	// Produce Top-N.
-	topDirStorage := SortedBySize(dirStorage)
-	topDirFiles := SortedBySize(dirFiles)
-	topDirTime := SortedBySize(dirTime)
-	topExtStorage := SortedBySize(extStorage)
+	topDirStorage := SizeAscending(dirStorage)
+	topDirFiles := SizeAscending(dirFiles)
+	topDirTime := SizeAscending(dirTime)
+	topExtStorage := SizeAscending(extStorage)
+	topFilesList := SizeAscending(filesList)
 
 	N := viper.GetInt("files-number")
-
 	fmt.Printf("Top %d directories by time spent:\n", N)
 	for i := 0; i < N && i < len(topDirTime); i++ {
 		entry := &topDirTime[i]
@@ -224,27 +183,43 @@ entries:
 		fmt.Printf("%7.2f MiB: %v\n", float64(entry.Size)/1024/1024, entry.Path)
 	}
 	fmt.Println()
-}
 
-// SortedBySize returns direcotries in m sorted by Size (biggest first).
-func SortedBySize(m map[string]int64) []PathSize {
-	bySize := BySize{}
-	for dir, size := range m {
-		bySize = append(bySize, PathSize{dir, size})
+	fmt.Printf("Top %d files by size:\n", N)
+	for i := 0; i < N && i < len(topFilesList); i++ {
+		entry := &topFilesList[i]
+		fmt.Printf("%7.2f MiB: %v\n", float64(entry.Size)/1024/1024, entry.Path)
 	}
-	sort.Sort(bySize)
-	return []PathSize(bySize)
+
+	output := viper.GetString("output")
+	if output != "" {
+		f, err := os.Create(output)
+		if err != nil {
+			log.Error(err)
+		}
+
+		defer f.Close()
+
+		w := bufio.NewWriter(f)
+		_, err = w.WriteString("List of files by size:\n")
+		if err != nil {
+			log.Error(err)
+		}
+
+		for i := 0; i < len(topFilesList); i++ {
+			entry := &topFilesList[i]
+			line := fmt.Sprintf("%7.2f MiB: %v\n", float64(entry.Size)/1024/1024, entry.Path)
+			_, err = w.WriteString(line)
+			if err != nil {
+				log.Error(err)
+			}
+		}
+
+		err = w.Flush()
+		if err != nil {
+			log.Error(err)
+		}
+
+		fmt.Println()
+		fmt.Printf("\nThe complete logs could be found here: %s \n", output)
+	}
 }
-
-// PathSize represents a directory with a size.
-type PathSize struct {
-	Path string
-	Size int64
-}
-
-// BySize sorts by size (biggest first).
-type BySize []PathSize
-
-func (a BySize) Len() int           { return len(a) }
-func (a BySize) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a BySize) Less(i, j int) bool { return a[i].Size > a[j].Size }
